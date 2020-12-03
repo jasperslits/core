@@ -1,5 +1,6 @@
 """Config flow to configure roomba component."""
-from roomba import Roomba
+from roombapy import Roomba, RoombaDiscovery
+from roombapy.getpassword import RoombaPassword
 import voluptuous as vol
 
 from homeassistant import config_entries, core
@@ -21,8 +22,6 @@ from .const import DOMAIN  # pylint:disable=unused-import
 DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_HOST): str,
-        vol.Required(CONF_BLID): str,
-        vol.Required(CONF_PASSWORD): str,
         vol.Optional(CONF_CONTINUOUS, default=DEFAULT_CONTINUOUS): bool,
         vol.Optional(CONF_DELAY, default=DEFAULT_DELAY): int,
     }
@@ -61,39 +60,93 @@ class RoombaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry):
         """Get the options flow for this handler."""
-        return OptionsFlowHandler(config_entry)
+        return RoombaFlowHandler(config_entry)
 
     async def async_step_import(self, import_info):
         """Set the config entry up from yaml."""
         return await self.async_step_user(import_info)
+
+    async def async_step_link(self, user_input=None):
+        """Attempt to link with the Hue bridge.
+
+        Given a configured host, will ask the user to press the link button
+        to connect to the bridge.
+        """
+
+        if user_input is None:
+            return self.async_show_form(step_id="link")
+
+        errors = {}
+
+        user_input[CONF_HOST] = self.host
+        user_input[CONF_CONTINUOUS] = self.continuous
+        user_input[CONF_DELAY] = self.delay
+
+        res = RoombaPassword(self.host).get_password()
+        if res:
+            user_input[CONF_PASSWORD] = res
+
+            try:
+                info = await validate_input(self.hass, user_input)
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+        else:
+            errors["base"] = "cannot_read_password"
+
+        if "base" not in errors:
+            await async_disconnect_or_timeout(self.hass, info[ROOMBA_SESSION])
+            return self.async_create_entry(title=info[CONF_NAME], data=user_input)
+
+        if errors:
+            return self.async_show_form(step_id="link", errors=errors)
+
+    async def roomba_discover_robot(self):
+        """Discover new devices."""
+        roombadisco = RoombaDiscovery()
+        if roombadisco:
+            for robot in roombadisco.find():
+                """ Check against configured devices """
+                return {"ip": robot.ip, "blid": robot.blid}
+        return None
 
     async def async_step_user(self, user_input=None):
         """Handle a flow initialized by the user."""
         errors = {}
 
         if user_input is not None:
-            await self.async_set_unique_id(user_input[CONF_BLID])
-            self._abort_if_unique_id_configured()
-            try:
-                info = await validate_input(self.hass, user_input)
-            except CannotConnect:
-                errors = {"base": "cannot_connect"}
+            self.delay = user_input[CONF_DELAY]
+            self.continuous = user_input[CONF_CONTINUOUS]
 
-            if "base" not in errors:
-                await async_disconnect_or_timeout(self.hass, info[ROOMBA_SESSION])
-                return self.async_create_entry(title=info[CONF_NAME], data=user_input)
+            return await self.async_step_link()
+
+        discovered_robot = await self.roomba_discover_robot()
+        if discovered_robot is None:
+            errors["base"] = "no_discovery"
+        else:
+            self.host = discovered_robot["ip"]
+            self.blid = discovered_robot["blid"]
+
+        roomba_schema = vol.Schema(
+            {
+                vol.Optional(CONF_CONTINUOUS, default=DEFAULT_CONTINUOUS): bool,
+                vol.Optional(CONF_DELAY, default=DEFAULT_DELAY): int,
+            }
+        )
 
         return self.async_show_form(
-            step_id="user", data_schema=DATA_SCHEMA, errors=errors
+            step_id="user", data_schema=roomba_schema, errors=errors
         )
 
 
-class OptionsFlowHandler(config_entries.OptionsFlow):
+class RoombaFlowHandler(config_entries.OptionsFlow):
     """Handle options."""
 
     def __init__(self, config_entry):
         """Initialize options flow."""
         self.config_entry = config_entry
+        self.host = None
+        self.delay = None
+        self.mode = None
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""

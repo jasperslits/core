@@ -1,4 +1,4 @@
-"""The roomba constants."""
+"""The Roomba constants."""
 DOMAIN = "roomba"
 COMPONENTS = ["sensor", "binary_sensor", "vacuum"]
 CONF_CERT = "certificate"
